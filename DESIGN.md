@@ -159,6 +159,11 @@ resulted in an error.
 Once the operator resolves messages 0-1 in the error log, it will be truncated and the system can resume
 processing under normal operations.
 
+### Log Compaction
+
+Every message in the system will remain in the commit log for a configurable period of time with a default
+of 1 hour. A process will handle compacting any old log segments up to the active log segment.
+
 ## Reader State
 
 When a reader sends a messages down the pipeline, it can define `State` associated with the message.
