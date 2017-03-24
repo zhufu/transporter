@@ -79,31 +79,33 @@ systems capabilities.
 The system will support an ***at least once*** delivery guarantee wherein the possibility of the same
 message being sent more than once exists. 
 
-In order to facilitate this, each writer will have an append only commit log and error log. When a 
-message is received by the writer, it will process the message and if no error occurs, it will be 
-appended to the commit log. In addition to appending the message, the writer will also be able to 
-perform offset tracking which will correlate with the last message written to the underlying system. 
-_If_ the writer uses a bulk mechanism, any errors returned from the bulk operation should cause the 
-system to stop. 
+In order to facilitate this, the reader will have an append only commit log. When a message is sent down
+the pipeline, it will be appended to the commit log. Each writer will have its own offset in the log 
+(similar to a consumer group in kafka) wherein after a success write to the underlying source, the offset 
+will be updated in the commit log. _If_ the writer uses a bulk mechanism, any errors returned from the 
+bulk operation should cause the system to stop. 
 
 ### Normal Operations
 
-Example of a bulk writer (X = message, O = offset):
+Example of a bulk writer (X = message, 0 = consumer 0 offset, 1 = consumer 1 offset):
 
 commit log
 ```
-+--+--+--+--+--+--+--+--+--+--+
-|X |X |X |X |XO|X |X |X |  |  |
-+--+--+--+--+--+--+--+--+--+--+
-   0  1  2  3  4  5  6  7  8  9 
+   +--+--+--+--+--+--+--+--+--+--+
+msg|X |X |X |X |X |X |X |X |  |  |
+ c0|  |  |  |  | 0|  |  |  |  |  |
+ c1|  |  |  | 1|  |  |  |  |  |  |
+   +--+--+--+--+--+--+--+--+--+--+
+      0  1  2  3  4  5  6  7  8  9 
 ```
 
-In the above scenario, the commit log is at position 7 but the offset is only at position 4. This would
-indicate messages 5-7 have either not been committed to the underlying system or are in the process
-of being committed and awaiting a response.
+In the above scenario, the commit log is position 7, consumer 0 offset at position 4, and consumer 1 offset
+at position 3. Messages 5-7 have either not been committed to the underlying system or are in the process of 
+being committed and awaiting a response for consumer 0 and messages 4-7 for consumer 1.
 
-Should the system be forcefully terminated and restarted, messages 5-7 will be redelivered to the writer
-and the system will wait until the offset (O) is 7 to ensure message delivery. 
+Should the system be forcefully terminated and restarted, messages 5-7 will be redelivered to consumer 0 and
+the system will wait until the offset (0) is at position 7 to ensure message delivery. The same process will
+be performed for consumer 1 with redelivery of messages 4-7 and wait until the offset (1) is at position 7.
 
 If the system performs a "clean" shutdown, it provides a 30 second window to allow all writers to commit
 any messages to the underlying system.
@@ -112,33 +114,36 @@ In both scenarios, the state of the system would then be:
 
 commit log
 ```
-+--+--+--+--+--+--+--+--+--+--+
-|X |X |X |X |X |X |X |XO|  |  |
-+--+--+--+--+--+--+--+--+--+--+
-   0  1  2  3  4  5  6  7  8  9 
+   +--+--+--+--+--+--+--+--+--+--+
+msg|X |X |X |X |X |X |X |X |  |  |
+ c0|  |  |  |  |  |  |  | 0|  |  |
+ c1|  |  |  |  |  |  |  | 1|  |  |
+   +--+--+--+--+--+--+--+--+--+--+
+      0  1  2  3  4  5  6  7  8  9 
 ```
 
 ### Message Failures
 
 Example of a bulk writer that receives an error response during a commit:
 
-
 commit log
 ```
-+--+--+--+--+--+--+--+--+--+--+
-|X |X |X |X |X |XO|X |X |  |  |
-+--+--+--+--+--+--+--+--+--+--+
-   0  1  2  3  4  5  6  7  8  9 
+   +--+--+--+--+--+--+--+--+--+--+
+msg|X |X |X |X |X |X |X |X |  |  |
+ c0|  |  |  |  |  | 0|  |  |  |  |
+   +--+--+--+--+--+--+--+--+--+--+
+      0  1  2  3  4  5  6  7  8  9 
 ```
 
 Writer attempts to commit messages 6-7 but receives an error response.
 
 commit log
 ```
-+--+--+--+--+--+--+--+--+--+--+
-|X |X |X |X |X |X |X |XO|  |  |
-+--+--+--+--+--+--+--+--+--+--+
-   0  1  2  3  4  5  6  7  8  9 
+   +--+--+--+--+--+--+--+--+--+--+
+msg|X |X |X |X |X |X |X |X |  |  |
+ c0|  |  |  |  |  |  |  | 0|  |  |
+   +--+--+--+--+--+--+--+--+--+--+
+      0  1  2  3  4  5  6  7  8  9 
 ```
 
 error log
@@ -170,7 +175,14 @@ When a reader sends a messages down the pipeline, it can define `State` associat
 The following attributes are available to readers for defining its state:
 
 ```Go
+// Store defines the set of methods an implementing State store must provide.
+type Store interface {
+	Apply(State) error
+	All() ([]State, error)
+}
+
 type State struct {
+  MsgID      uint64
 	Identifier interface{}
 	Timestamp  uint64
 	Namespace  string
@@ -194,6 +206,10 @@ The `Namespace` field will be used as the key for keeping track of `State` chang
 support multiple `Namespaces` in different `Modes`. If the system should encounter an error and be 
 restarted, the reader will be provided with a `[]State` that it can use to resume its work wherever it left
 off.
+
+The `MsgID` will be an atomically incremented counter set by the system not each reader and should be used
+by an implementing `Store` to ensure it only updates the `State` if the `MsgID` is greater than what is 
+currently stored.
 
 
 
