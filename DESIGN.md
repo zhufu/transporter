@@ -79,47 +79,97 @@ systems capabilities.
 The system will support an ***at least once*** delivery guarantee wherein the possibility of the same
 message being sent more than once exists. 
 
-In order to facilitate this, the reader will have an append only commit log. When a message is sent down
-the pipeline, it will be appended to the commit log. Each writer will have its own offset in the log 
-(similar to a consumer group in kafka) wherein after a success write to the underlying source, the offset 
-will be updated in the commit log. _If_ the writer uses a bulk mechanism, any errors returned from the 
-bulk operation should cause the system to stop. 
+The requirements for each component in the system could be broken down as follows:
+
+### readers
+- need to be able to attach additional information about each message and namespace:
+  - collection XYZ has completed the "copy" portion and is in "sync" phase but collection ABC never 
+    completed the "copy" phase).
+  - mongodb oplog time of last message was 123456
+- need to be provided with the data for the last message it had sent down the pipeline
+
+### writers
+- need to be able to acknowledge processing of messages both individually and in bulk
+- each writer must have its own message "offset" given situations where one writer only receives messages
+  1/2/4 and another writer receives messages 1/3/5/7 due to namespace or function filtering
+
+### functions
+- need to be able to acknowledge a message was processed for cases where the function resulted in the 
+  message not being sent to the underlying writer (i.e. skipped)
+
+In order to facilitate this, the reader will have an append only commit log. When a message 
+is sent down the pipeline, it will be appended to the commit log. Each writer will have its own offset in the 
+offset log (similar to a consumer group in kafka) wherein an acknowledgement of each message can be provided 
+after a successful write to the underlying source or if the message was skipped, the commit id will be 
+appended to the offset log. _If_ the writer uses a bulk mechanism, any errors returned from the bulk operation 
+should cause the system to stop. The consmer offsets will be written to the log at a configurable interval 
+(default of 1s) wherein a forceful termination of the system will only result in a processed message's offset 
+not being written to disk equal to the total amount of time between the interval.
 
 ### Normal Operations
 
-Example of a bulk writer (X = message, 0 = consumer 0 offset, 1 = consumer 1 offset):
+Example of a bulk writer
+
+```
+X     = message
+A/B/C = key (equal to the namespace)
+c0    = consumer 0 offset
+c1    = consumer 1 offset
+```
 
 commit log
 ```
-   +--+--+--+--+--+--+--+--+--+--+
-msg|X |X |X |X |X |X |X |X |  |  |
- c0|  |  |  |  | 0|  |  |  |  |  |
- c1|  |  |  | 1|  |  |  |  |  |  |
-   +--+--+--+--+--+--+--+--+--+--+
-      0  1  2  3  4  5  6  7  8  9 
+   +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+msg| X | X | X | X | X | X | X | X | X | X | X | X | X | X | X | X |   |
+key| A | A | B | B | A | A | B | B | C | A | C | B | A | A | C | B |   |
+   +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+id   0   1   2   3   4   5   6   7   8   9   10  11  12  13  14  15  16
 ```
 
-In the above scenario, the commit log is position 7, consumer 0 offset at position 4, and consumer 1 offset
-at position 3. Messages 5-7 have either not been committed to the underlying system or are in the process of 
-being committed and awaiting a response for consumer 0 and messages 4-7 for consumer 1.
+offset log
+```
+   +---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+key|c0 |c0 |c0 |c1 |c0 |c1 |c0 |c1 |c0 |c1 |c0 |   |   |   |
+val| 1 | 4 | 6 | 4 | 4 | 5 | 7 | 7 | 10| 13| 12|   |   |   |
+   +---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+```
 
-Should the system be forcefully terminated and restarted, messages 5-7 will be redelivered to consumer 0 and
-the system will wait until the offset (0) is at position 7 to ensure message delivery. The same process will
-be performed for consumer 1 with redelivery of messages 4-7 and wait until the offset (1) is at position 7.
+In the above scenario, the following would represent the current state of the system:
+
+```
+commit log = position 15
+c0 offset  = position 12
+c1 offset  = position 13
+```
+
+Messages 13-15 have either not been committed to the underlying system or are in the process 
+of being committed and awaiting a response for c0 and messages 14-15 for c1.
+
+Should the system be forcefully terminated and restarted, messages 13-15 will be redelivered to 
+c0 and the system will wait until its offset is at position 15 to ensure message delivery. The same 
+process will be performed for c1 with redelivery of messages 14-15 and wait until its offset is at 
+position 15.
 
 If the system performs a "clean" shutdown, it provides a 30 second window to allow all writers to commit
 any messages to the underlying system.
 
-In both scenarios, the state of the system would then be:
+Assuming a clean resume, the state of the system would then be:
 
 commit log
 ```
-   +--+--+--+--+--+--+--+--+--+--+
-msg|X |X |X |X |X |X |X |X |  |  |
- c0|  |  |  |  |  |  |  | 0|  |  |
- c1|  |  |  |  |  |  |  | 1|  |  |
-   +--+--+--+--+--+--+--+--+--+--+
-      0  1  2  3  4  5  6  7  8  9 
+   +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+msg| X | X | X | X | X | X | X | X | X | X | X | X | X | X | X | X |   |
+key| A | A | B | B | A | A | B | B | C | A | C | B | A | A | C | B |   |
+   +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+id   0   1   2   3   4   5   6   7   8   9   10  11  12  13  14  15  16
+```
+
+offset log
+```
+   +---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+key|c0 |c0 |c0 |c1 |c0 |c1 |c0 |c1 |c0 |c1 |c0 |c0 |c1 |   |
+val| 1 | 4 | 6 | 4 | 4 | 5 | 7 | 7 | 10| 13| 12| 15| 15|   |
+   +---+---+---+---+---+---+---+---+---+---+---+---+---+---+
 ```
 
 ### Message Failures
@@ -128,64 +178,156 @@ Example of a bulk writer that receives an error response during a commit:
 
 commit log
 ```
-   +--+--+--+--+--+--+--+--+--+--+
-msg|X |X |X |X |X |X |X |X |  |  |
- c0|  |  |  |  |  | 0|  |  |  |  |
-   +--+--+--+--+--+--+--+--+--+--+
-      0  1  2  3  4  5  6  7  8  9 
+   +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+msg| X | X | X | X | X | X | X | X | X | X | X | X | X | X | X | X |   |
+key| A | A | A | A | A | A | A | A | A | A | A | A | A | A | A | A |   |
+   +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+id   0   1   2   3   4   5   6   7   8   9   10  11  12  13  14  15  16
 ```
 
-Writer attempts to commit messages 6-7 but receives an error response.
+offset log
+```
+   +---+---+---+---+---+---+---+---+---+---+
+key|c0 |c0 |c0 |c0 |c0 |c0 |   |   |   |   |
+val| 1 | 3 | 4 | 5 | 7 | 8 |   |   |   |   |
+   +---+---+---+---+---+---+---+---+---+---+
+```
+
+Writer attempts to commit messages 9-15 but receives an error response.
 
 commit log
 ```
-   +--+--+--+--+--+--+--+--+--+--+
-msg|X |X |X |X |X |X |X |X |  |  |
- c0|  |  |  |  |  |  |  | 0|  |  |
-   +--+--+--+--+--+--+--+--+--+--+
-      0  1  2  3  4  5  6  7  8  9 
+   +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+msg| X | X | X | X | X | X | X | X | X | X | X | X | X | X | X | X |   |
+   +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+id   0   1   2   3   4   5   6   7   8   9   10  11  12  13  14  15  16
 ```
 
-error log
+offset log
 ```
-+--+--+--+--+--+--+--+--+--+--+
-|X |X |  |  |  |  |  |  |  |  |
-+--+--+--+--+--+--+--+--+--+--+
-   0  1  2  3  4  5  6  7  8  9 
+   +---+---+---+---+---+---+---+---+---+---+
+key|c0 |c0 |c0 |c0 |c0 |c0 |   |   |   |   |
+val| 1 | 3 | 4 | 5 | 7 | 8 |   |   |   |   |
+   +---+---+---+---+---+---+---+---+---+---+
 ```
 
-In the above scenario, the offset will be equal to the last message in the commit log and the messages
-that were part of the errored commit appended to the error log. At this point, this system will have 
-shutdown and the operator must review the messages in the error log to decide whether they can be discarded
-or attempt to be committed again. It will be up to each implemented writer to determine whether the
-messages it appends to the error log are all messages that were part of the commit or only the ones that
-resulted in an error.
+In the above scenario, c0 offset will still be 8 and the messages that were part of the errored 
+commit (9-15) will remain in the commit log. Upon restart (whether automatic or manual), the system will 
+redeliver messages 9-15 *ONE AT A TIME* to c0 and wait for acknowledgement before continuing. This means 
+that all bulk operations will occur with individual messages. 
 
-Once the operator resolves messages 0-1 in the error log, it will be truncated and the system can resume
-processing under normal operations.
+If the messages are successfully written to the underlying source, the system will then resume operations as 
+normal by providing the last offset message to the reader. 
+
+If an error occurs for a commit during the resume phase, the system will shutdown leaving c0 at the last 
+committed offset. In the above scenario, let's say messages 9-13 were successfully written to the underlying 
+source but message 14 resulted in a error, then c0 offset would be 13. 
+
+If messages 14-15 continue to cause the writer to error and system to shutdown, operator intervention will 
+be required to properly handle the messages. 
+
+The following capabilities will be made availabe to the operator:
+
+- process each message one at a time
+- view messages in the commit log from offset X to Y
+- mark a message as acknowledged without sending to the writer
+
+Once all consumer offsets are equal to the last offset in the commit log, the system will be able to resume
+reading new messages and sending them down the pipeline.
 
 ### Log Compaction
 
-Every message in the system will remain in the commit log for a configurable period of time with a default
-of 1 hour. A process will handle compacting any old log segments up to the active log segment.
+Every message in the system will remain in the commit log based on a configurable size with a default
+of 1GB. Once the configured size is reached, a new log will be created and become the active log.
+A process will handle compacting the commit log up to the earliest consumer offset while also
+retaining at least one message for each key (i.e. namespace) in the log. 
 
-## Reader State
+Only non-active log segments are eligible for compaction. This will prevent any large stop the world pauses in the 
+system on the active segment and will allow the system to create a full view of each message associated with a given 
+key (i.e. namespace) over the entire course of time.
 
-When a reader sends a messages down the pipeline, it can define `State` associated with the message.
-The following attributes are available to readers for defining its state:
+The offset log will also be compacted continually such that every consumer will have at least 1 offset in 
+the log for each unique key.
+
+commit log before compaction
+```
+   +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+msg| X | X | X | X | X | X | X | X | X | X | X | X | X | X | X | X | X |
+key| A | A | B | B | A | A | B | B | C | A | C | B | A | A | C | B | A |
+   +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+id   0   1   2   3   4   5   6   7   8   9   10  11  12  13  14  15  16
+```
+
+active commit log before compaction
+```
+   +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+msg| X | X | X | X | X | X | X | X | X | X | X | X | X | X | X | X | X |
+key| A | A | B | B | A | A | B | B | C | A | C |   |   |   |   |   |   |
+   +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+id   17  18  19  20  21  22  23  24  25  26  27  28  29  30  31  32  33
+```
+
+offset log
+```
+   +---+---+---+---+---+---+---+---+---+---+
+key|c0A|c0A|c0B|c0C|c0A|c0B|c0C|c0A|c0B|c0C|
+val| 1 | 8 | 1 | 3 | 13| 12| 9 | 26| 23| 27|
+   +---+---+---+---+---+---+---+---+---+---+
+```
+
+old commit log after compaction
+```
+   +---+---+---+
+msg| X | X | X |
+key| C | B | A |
+   +---+---+---+
+id   14  15  16  
+```
+
+active commit log after compaction
+```
+   +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+msg| X | X | X | X | X | X | X | X | X | X | X | X | X | X | X | X | X |
+key| A | A | B | B | A | A | B | B | C | A | C |   |   |   |   |   |   |
+   +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+id   17  18  19  20  21  22  23  24  25  26  27  28  29  30  31  32  33
+```
+
+offset log after compaction
+```
+   +---+---+---+---+---+---+---+---+---+---+
+key|c0A|c0B|c0C|   |   |   |   |   |   |   |
+val| 26| 23| 27|   |   |   |   |   |   |   |
+   +---+---+---+---+---+---+---+---+---+---+
+```
+
+## Message Format
+
+### Message
+```
+key length  - 4 bytes
+key         - K bytes
+data length - 4 bytes
+data        - D bytes
+```
+
+### Log
+```
+offset         - 8 bytes
+message length - 4 bytes
+timestamp      - 8 bytes
+mode           - 1 byte
+key length     - 4 bytes
+key            - K bytes
+data length    - 4 bytes
+data           - D bytes
+```
 
 ```Go
-// Store defines the set of methods an implementing State store must provide.
-type Store interface {
-	Apply(State) error
-	All() ([]State, error)
-}
-
-type State struct {
-  MsgID      uint64
-	Identifier interface{}
+type LogEntry struct {
+	Key        []byte
+	Value      []byte
 	Timestamp  uint64
-	Namespace  string
 	Mode       Mode
 }
 
@@ -194,6 +336,7 @@ type Mode int
 const (
 	Copy Mode = iota
 	Sync
+	Complete
 )
 ```
 
