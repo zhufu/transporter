@@ -340,21 +340,5 @@ const (
 )
 ```
 
-As `State` flows through the system, it will be persisted such that on restart, the last known `State` 
-can be retrieved. This persistence will work in conjuction with offset tracking of the commit log. When 
-the offset is updated, the `State` associated with that message will be persisted and replace any previous
-`State`. 
-
-The `Namespace` field will be used as the key for keeping track of `State` changes over time in order to
-support multiple `Namespaces` in different `Modes`. If the system should encounter an error and be 
-restarted, the reader will be provided with a `[]State` that it can use to resume its work wherever it left
-off.
-
-The `MsgID` will be an atomically incremented counter set by the system not each reader and should be used
-by an implementing `Store` to ensure it only updates the `State` if the `MsgID` is greater than what is 
-currently stored.
-
-
-
 
 
