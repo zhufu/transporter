@@ -316,7 +316,19 @@ data        - D bytes
 offset         - 8 bytes
 message length - 4 bytes
 timestamp      - 8 bytes
-mode           - 1 byte
+attributes     - 1 byte
+  bits 0 - 1 : mode
+    0 : Copy
+    1 : Sync
+    2 : Complete
+  bits 2 - 4 : op
+    0 : Insert
+    1 : Update
+    2 : Delete
+    3 : Command
+    4 : Noop
+    5 : Skip
+    6 : Unknown
 key length     - 4 bytes
 key            - K bytes
 data length    - 4 bytes
