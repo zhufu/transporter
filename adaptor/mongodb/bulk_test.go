@@ -1,7 +1,6 @@
 package mongodb
 
 import (
-	"context"
 	"crypto/rand"
 	"fmt"
 	"sync"
@@ -10,17 +9,21 @@ import (
 
 	"gopkg.in/mgo.v2/bson"
 
+	"github.com/compose/transporter/adaptor"
 	"github.com/compose/transporter/message"
 	"github.com/compose/transporter/message/ops"
 )
 
 var (
 	bulkTestData     = &TestData{"bulk_test", "foo", 0}
-	testBulkMsgCount = 10
+	testBulkMsgCount = 20
 	bulkTests        = []*BulkTest{
 		&BulkTest{ops.Insert, bson.M{}, testBulkMsgCount, nil},
 		&BulkTest{ops.Update, bson.M{"hello": "world"}, testBulkMsgCount, map[string]interface{}{"hello": "world"}},
 		&BulkTest{ops.Delete, bson.M{}, 0, nil},
+		&BulkTest{ops.Insert, bson.M{}, testBulkMsgCount, map[string]interface{}{"requestTooLarge": randStr(5e6)}},
+		&BulkTest{ops.Delete, bson.M{}, 0, nil},
+		&BulkTest{ops.Insert, bson.M{}, testBulkMsgCount, map[string]interface{}{"bulkTooLarge": randStr(1e6)}},
 	}
 )
 
@@ -40,18 +43,9 @@ func checkBulkCount(c string, countQuery bson.M, expectedCount int, t *testing.T
 	}
 }
 
-func confirmWrite(ctx context.Context, confirmed chan struct{}) {
-	for {
-		select {
-		case <-confirmed:
-			return
-		case <-ctx.Done():
-			return
-		}
-	}
-}
-
 func TestBulkWrite(t *testing.T) {
+	confirms, cleanup := adaptor.MockConfirmWrites()
+	defer adaptor.VerifyWriteConfirmed(cleanup, t)
 	var wg sync.WaitGroup
 	done := make(chan struct{})
 	b := newBulker(done, &wg)
@@ -68,9 +62,6 @@ func TestBulkWrite(t *testing.T) {
 			for k, v := range bt.extraData {
 				data[k] = v
 			}
-			confirms := make(chan struct{})
-			ctx, _ := context.WithTimeout(context.TODO(), 5*time.Second)
-			go confirmWrite(ctx, confirms)
 			b.Write(message.WithConfirms(confirms, message.From(bt.op, bulkTestData.C, data)))(s)
 		}
 		time.Sleep(3 * time.Second)
@@ -131,6 +122,8 @@ func TestBulkOpCount(t *testing.T) {
 }
 
 func TestBulkIsDup(t *testing.T) {
+	confirms, cleanup := adaptor.MockConfirmWrites()
+	defer adaptor.VerifyWriteConfirmed(cleanup, t)
 	var wg sync.WaitGroup
 	done := make(chan struct{})
 	b := newBulker(done, &wg)
@@ -144,7 +137,7 @@ func TestBulkIsDup(t *testing.T) {
 	for i := 0; i < testBulkMsgCount; i++ {
 		b.Write(
 			message.WithConfirms(
-				make(chan struct{}),
+				confirms,
 				message.From(ops.Insert, "dupErr", map[string]interface{}{"_id": i, "i": i}),
 			),
 		)(s)
@@ -155,7 +148,7 @@ func TestBulkIsDup(t *testing.T) {
 	for i := 0; i < (2 * testBulkMsgCount); i++ {
 		b.Write(
 			message.WithConfirms(
-				make(chan struct{}),
+				confirms,
 				message.From(ops.Insert, "dupErr", map[string]interface{}{"_id": i, "i": i}),
 			),
 		)(s)

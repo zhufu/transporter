@@ -3,10 +3,12 @@ package mongodb
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"net"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/compose/transporter/client"
@@ -23,6 +25,9 @@ const (
 	// DefaultSessionTimeout is the default timeout after which the
 	// session times out when unable to connect to the provided URI.
 	DefaultSessionTimeout = 10 * time.Second
+
+	// DefaultReadPreference when connecting to a mongo replica set.
+	DefaultReadPreference = mgo.Primary
 )
 
 var (
@@ -43,6 +48,15 @@ func (e OplogAccessError) Error() string {
 	return fmt.Sprintf("oplog access failed, %s", e.reason)
 }
 
+// InvalidReadPreferenceError represents the error when an incorrect mongo read preference has been set.
+type InvalidReadPreferenceError struct {
+	ReadPreference string
+}
+
+func (e InvalidReadPreferenceError) Error() string {
+	return fmt.Sprintf("Invalid Read Preference, %s", e.ReadPreference)
+}
+
 // ClientOptionFunc is a function that configures a Client.
 // It is used in NewClient.
 type ClientOptionFunc func(*Client) error
@@ -55,6 +69,7 @@ type Client struct {
 	tlsConfig      *tls.Config
 	sessionTimeout time.Duration
 	tail           bool
+	readPreference mgo.Mode
 
 	mgoSession *mgo.Session
 }
@@ -81,6 +96,7 @@ func NewClient(options ...ClientOptionFunc) (*Client, error) {
 		safety:         DefaultSafety,
 		tlsConfig:      nil,
 		tail:           false,
+		readPreference: DefaultReadPreference,
 	}
 
 	// Run the options on it
@@ -139,14 +155,16 @@ func WithCACerts(certs []string) ClientOptionFunc {
 		if len(certs) > 0 {
 			roots := x509.NewCertPool()
 			for _, cert := range certs {
-				if _, err := os.Stat(cert); err == nil {
-					c, err := ioutil.ReadFile(cert)
-					if err != nil {
-						return err
-					}
-					cert = string(c)
+				if _, err := os.Stat(cert); err != nil {
+					return errors.New("Cert file not found")
 				}
-				if ok := roots.AppendCertsFromPEM([]byte(cert)); !ok {
+
+				c, err := ioutil.ReadFile(cert)
+				if err != nil {
+					return err
+				}
+
+				if ok := roots.AppendCertsFromPEM(c); !ok {
 					return client.ErrInvalidCert
 				}
 			}
@@ -185,6 +203,31 @@ func WithFsync(fsync bool) ClientOptionFunc {
 func WithTail(tail bool) ClientOptionFunc {
 	return func(c *Client) error {
 		c.tail = tail
+		return nil
+	}
+}
+
+// WithReadPreference sets the MongoDB read preference based on the provided string.
+func WithReadPreference(readPreference string) ClientOptionFunc {
+	return func(c *Client) error {
+		if readPreference == "" {
+			c.readPreference = DefaultReadPreference
+			return nil
+		}
+		switch strings.ToLower(readPreference) {
+		case "primary":
+			c.readPreference = mgo.Primary
+		case "primarypreferred":
+			c.readPreference = mgo.PrimaryPreferred
+		case "secondary":
+			c.readPreference = mgo.Secondary
+		case "secondarypreferred":
+			c.readPreference = mgo.SecondaryPreferred
+		case "nearest":
+			c.readPreference = mgo.Nearest
+		default:
+			return InvalidReadPreferenceError{ReadPreference: readPreference}
+		}
 		return nil
 	}
 }
@@ -230,6 +273,7 @@ func (c *Client) initConnection() error {
 	mgoSession.SetBatch(1000)
 	mgoSession.SetPrefetch(0.5)
 	mgoSession.SetSocketTimeout(time.Hour)
+	mgoSession.SetMode(c.readPreference, true)
 
 	if c.tail {
 		log.With("uri", c.uri).Infoln("testing oplog access")

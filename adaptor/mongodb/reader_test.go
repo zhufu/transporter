@@ -47,7 +47,7 @@ func TestRead(t *testing.T) {
 		t.Fatalf("unexpected Read error, %s\n", err)
 	}
 	var numMsgs int
-	for _ = range msgChan {
+	for range msgChan {
 		numMsgs++
 	}
 	if numMsgs != readerTestData.InsertCount {
@@ -83,7 +83,7 @@ func TestFilteredRead(t *testing.T) {
 		t.Fatalf("unexpected Read error, %s\n", err)
 	}
 	var numMsgs int
-	for _ = range msgChan {
+	for range msgChan {
 		numMsgs++
 	}
 	expectedCount := 100 - filteredReaderTestData.InsertCount
@@ -120,7 +120,7 @@ func TestSkipCollection(t *testing.T) {
 		t.Fatalf("unexpected Read error, %s\n", err)
 	}
 	var numMsgs int
-	for _ = range msgChan {
+	for range msgChan {
 		numMsgs++
 	}
 	if numMsgs != skipReaderTestData.InsertCount {
@@ -152,7 +152,7 @@ func TestCancelledRead(t *testing.T) {
 		close(done)
 	}()
 	var numMsgs int
-	for _ = range msgChan {
+	for range msgChan {
 		time.Sleep(100 * time.Millisecond)
 		numMsgs++
 	}
@@ -217,7 +217,7 @@ func TestReadRestart(t *testing.T) {
 	}()
 
 	var numMsgs int
-	for _ = range msgChan {
+	for range msgChan {
 		time.Sleep(100 * time.Millisecond)
 		numMsgs++
 	}
@@ -242,20 +242,14 @@ func insertUpdateData(s *Session) error {
 	if err := s.mgoSession.DB(tailTestData.DB).C("bar").Insert(bson.M{"_id": 0, "hello": "world"}); err != nil {
 		return err
 	}
-	if err := s.mgoSession.DB(tailTestData.DB).C("bar").Update(bson.M{"_id": 0}, bson.M{"$set": bson.M{"hello": "goodbye"}}); err != nil {
-		return err
-	}
-	return nil
+	return s.mgoSession.DB(tailTestData.DB).C("bar").Update(bson.M{"_id": 0}, bson.M{"$set": bson.M{"hello": "goodbye"}})
 }
 
 func insertDeleteData(s *Session) error {
 	if err := s.mgoSession.DB(tailTestData.DB).C("baz").Insert(bson.M{"_id": 0, "hello": "world"}); err != nil {
 		return err
 	}
-	if err := s.mgoSession.DB(tailTestData.DB).C("baz").RemoveId(0); err != nil {
-		return err
-	}
-	return nil
+	return s.mgoSession.DB(tailTestData.DB).C("baz").RemoveId(0)
 }
 
 func TestTail(t *testing.T) {

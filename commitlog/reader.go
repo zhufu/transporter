@@ -5,6 +5,7 @@ import (
 	"sync"
 )
 
+// Reader implements io.Reader for use with reading from the commit log.
 type Reader struct {
 	commitlog *CommitLog
 	idx       int
@@ -40,6 +41,10 @@ func (r *Reader) Read(p []byte) (int, error) {
 		r.idx++
 		segment = segments[r.idx]
 		r.position = 0
+		// err = segment.Open()
+		// if err != nil {
+		// 	break
+		// }
 	}
 
 	return n, err

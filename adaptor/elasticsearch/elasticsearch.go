@@ -30,6 +30,7 @@ const (
   // "timeout": "10s", // defaults to 30s
   // "aws_access_key": "ABCDEF", // used for signing requests to AWS Elasticsearch service
   // "aws_access_secret": "ABCDEF" // used for signing requests to AWS Elasticsearch service
+  // "parent_id": "elastic_parent" // defaults to "elastic_parent" parent identifier for Elasticsearch
 }`
 )
 
@@ -43,6 +44,7 @@ type Elasticsearch struct {
 	adaptor.BaseConfig
 	AWSAccessKeyID  string `json:"aws_access_key" doc:"credentials for use with AWS Elasticsearch service"`
 	AWSAccessSecret string `json:"aws_access_secret" doc:"credentials for use with AWS Elasticsearch service"`
+	ParentID        string `json:"parent_id"`
 }
 
 // Description for the Elasticsearcb adaptor
@@ -89,17 +91,6 @@ func setupWriter(conf *Elasticsearch) (client.Writer, error) {
 		uri.Path = fmt.Sprintf("/%s", DefaultIndex)
 	}
 
-	hostsAndPorts := strings.Split(uri.Host, ",")
-	stringVersion, err := determineVersion(fmt.Sprintf("%s://%s", uri.Scheme, hostsAndPorts[0]), uri.User)
-	if err != nil {
-		return nil, err
-	}
-
-	v, err := version.NewVersion(stringVersion)
-	if err != nil {
-		return nil, client.VersionError{URI: conf.URI, V: stringVersion, Err: err.Error()}
-	}
-
 	timeout, err := time.ParseDuration(conf.Timeout)
 	if err != nil {
 		log.Debugf("failed to parse duration, %s, falling back to default timeout of 30s", conf.Timeout)
@@ -111,6 +102,19 @@ func setupWriter(conf *Elasticsearch) (client.Writer, error) {
 		Transport: newTransport(conf.AWSAccessKeyID, conf.AWSAccessSecret),
 	}
 
+	hostsAndPorts := strings.Split(uri.Host, ",")
+	stringVersion, err := determineVersion(
+		fmt.Sprintf("%s://%s", uri.Scheme, hostsAndPorts[0]),
+		uri.User,
+		httpClient,
+	)
+	if err != nil {
+		return nil, err
+	}
+	v, err := version.NewVersion(stringVersion)
+	if err != nil {
+		return nil, client.VersionError{URI: conf.URI, V: stringVersion, Err: err.Error()}
+	}
 	for _, vc := range clients.Clients {
 		if vc.Constraint.Check(v) {
 			urls := make([]string, len(hostsAndPorts))
@@ -122,6 +126,7 @@ func setupWriter(conf *Elasticsearch) (client.Writer, error) {
 				UserInfo:   uri.User,
 				HTTPClient: httpClient,
 				Index:      uri.Path[1:],
+				ParentID:   conf.ParentID,
 			}
 			versionedClient, _ := vc.Creator(opts)
 			return versionedClient, nil
@@ -131,7 +136,7 @@ func setupWriter(conf *Elasticsearch) (client.Writer, error) {
 	return nil, client.VersionError{URI: conf.URI, V: stringVersion, Err: "unsupported client"}
 }
 
-func determineVersion(uri string, user *url.Userinfo) (string, error) {
+func determineVersion(uri string, user *url.Userinfo, httpClient *http.Client) (string, error) {
 	req, err := http.NewRequest(http.MethodGet, uri, nil)
 	if err != nil {
 		return "", err
@@ -141,7 +146,7 @@ func determineVersion(uri string, user *url.Userinfo) (string, error) {
 			req.SetBasicAuth(user.Username(), pwd)
 		}
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return "", client.ConnectError{Reason: uri}
 	}

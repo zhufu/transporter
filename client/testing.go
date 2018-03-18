@@ -10,8 +10,10 @@ import (
 )
 
 var (
+	// ErrMockConnect returns a connection error for use in tests.
 	ErrMockConnect = errors.New("connect failed")
-	ErrMockWrite   = errors.New("write failed")
+	// ErrMockWrite returns a write error for use in tests.
+	ErrMockWrite = errors.New("write failed")
 )
 
 // Mock can be used for mocking tests that need no actual client or Session.
@@ -76,12 +78,13 @@ func (w *MockWriter) Write(msg message.Msg) func(Session) (message.Msg, error) {
 	return func(s Session) (message.Msg, error) {
 		w.MsgCount++
 		if msg.Confirms() != nil {
-			close(msg.Confirms())
+			msg.Confirms() <- struct{}{}
 		}
 		return msg, nil
 	}
 }
 
+// MockErrWriter can be used to similate write errors in tests.
 type MockErrWriter struct {
 }
 
