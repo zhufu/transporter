@@ -99,13 +99,15 @@ func (w *Writer) Write(msg message.Msg) func(client.Session) (message.Msg, error
 			// we need to flush any pending writes here or this could fail because we're using
 			// more than 1 worker
 			w.bp.Flush()
-			indexReq := elastic.NewBulkDeleteRequest().Index(w.index).Type(indexType).Id(id)
+			indexReq := elastic.NewBulkDeleteRequest().Index(w.index).Type(indexType).Id(id).
+				VersionType("external").Version(msg.Timestamp())
 			if pID != "" {
 				indexReq.Routing(pID)
 			}
 			br = indexReq
 		case ops.Insert:
-			indexReq := elastic.NewBulkIndexRequest().Index(w.index).Type(indexType).Id(id)
+			indexReq := elastic.NewBulkIndexRequest().Index(w.index).Type(indexType).Id(id).
+				VersionType("external").Version(msg.Timestamp())
 			if pID != "" {
 				indexReq.Parent(pID)
 				indexReq.Routing(pID)
@@ -113,7 +115,8 @@ func (w *Writer) Write(msg message.Msg) func(client.Session) (message.Msg, error
 			indexReq.Doc(msg.Data())
 			br = indexReq
 		case ops.Update:
-			indexReq := elastic.NewBulkUpdateRequest().Index(w.index).Type(indexType).Id(id)
+			indexReq := elastic.NewBulkUpdateRequest().Index(w.index).Type(indexType).Id(id).
+				VersionType("external").Version(msg.Timestamp())
 			if pID != "" {
 				indexReq.Parent(pID)
 				indexReq.Routing(pID)
